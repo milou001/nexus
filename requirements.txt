@@ -1,0 +1,13 @@
+"""
+INPUT:
+- None
+OUTPUT:
+- Dependency list for Nexus backend environment.
+"""
+fastapi
+uvicorn
+sqlalchemy
+pymupdf
+httpx
+pydantic
+python-multipart
