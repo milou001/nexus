@@ -35,7 +35,7 @@ def search(query: str, limit: int, report_types: list[str], year: str | None) ->
 
     query_embedding = embedding_service.get_embedding(query)
 
-    stmt = select(Report, Embedding).join(Embedding, Report.embedding_id == Embedding.id)
+    stmt = select(Report).join(Embedding, Report.id == Embedding.report_id)
     if report_types:
         stmt = stmt.filter(Report.type.in_(report_types))
     if year:
@@ -46,11 +46,11 @@ def search(query: str, limit: int, report_types: list[str], year: str | None) ->
         rows = session.execute(stmt).all()
         if not rows:
             return []
-        for report, embedding in rows:
-            vec = embedding.vector if isinstance(embedding.vector, list) else []
-            if not vec:
+        for (report,) in rows:
+            emb = session.query(Embedding).filter(Embedding.report_id == report.id).first()
+            if not emb or not isinstance(emb.vector, list) or not emb.vector:
                 continue
-            relevance = _cosine_similarity(query_embedding, vec)
+            relevance = _cosine_similarity(query_embedding, emb.vector)
             results.append(
                 SearchResult(
                     id=report.id,

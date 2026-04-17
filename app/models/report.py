@@ -28,10 +28,9 @@ class Report(Base):
     type: Mapped[str] = mapped_column(String(32), nullable=False)
     file_path: Mapped[str] = mapped_column(String(1024), nullable=False)
     content_text: Mapped[str] = mapped_column(Text, nullable=False)
-    embedding_id: Mapped[int] = mapped_column(Integer, ForeignKey("embeddings.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
-    embedding: Mapped["Embedding"] = relationship("Embedding", foreign_keys=[embedding_id], back_populates="report")
+    embedding: Mapped["Embedding | None"] = relationship("Embedding", back_populates="report", uselist=False)
 
 
 class Embedding(Base):
@@ -40,9 +39,9 @@ class Embedding(Base):
     __tablename__ = "embeddings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    report_id: Mapped[int] = mapped_column(Integer, ForeignKey("reports.id"), nullable=False)
+    report_id: Mapped[int] = mapped_column(Integer, ForeignKey("reports.id"), unique=True, nullable=False)
     vector: Mapped[list[float]] = mapped_column(JSON, nullable=False)
     model_name: Mapped[str] = mapped_column(String(128), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
-    report: Mapped[Report] = relationship("Report", foreign_keys=[report_id], back_populates="embedding")
+    report: Mapped[Report] = relationship("Report", back_populates="embedding")
