@@ -36,8 +36,14 @@ def search(query: str, limit: int, report_types: list[str], year: str | None) ->
 
     results: list[SearchResult] = []
     with Session(engine) as session:
-        for report, embedding in session.execute(stmt).all():
-            relevance = _cosine_similarity(query_embedding, embedding.vector)
+        rows = session.execute(stmt).all()
+        if not rows:
+            return []
+        for report, embedding in rows:
+            vec = embedding.vector if isinstance(embedding.vector, list) else []
+            if not vec:
+                continue
+            relevance = _cosine_similarity(query_embedding, vec)
             results.append(
                 SearchResult(
                     id=report.id,
