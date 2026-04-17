@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from math import sqrt
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -26,6 +26,13 @@ def _cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
 
 def search(query: str, limit: int, report_types: list[str], year: str | None) -> list[SearchResult]:
     engine = create_engine(f"sqlite:///{settings.db_path}")
+
+    # Early return if no reports exist (skip embedding call)
+    with Session(engine) as session:
+        report_count = session.scalar(select(func.count()).select_from(Report))
+        if report_count == 0:
+            return []
+
     query_embedding = embedding_service.get_embedding(query)
 
     stmt = select(Report, Embedding).join(Embedding, Report.embedding_id == Embedding.id)
