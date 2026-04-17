@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models.report import Report
 from app.schemas.scry import SearchRequest, SearchResult
+from app.services.ingestion import ingest_pdf
 from app.services.searcher import search
 
 router = APIRouter(prefix="/api/scry", tags=["scry"])
@@ -40,6 +41,27 @@ def get_report(report_id: int) -> SearchResult:
             pdf_url=report.file_path,
             hits=[],
         )
+
+
+@router.post("/ingest", response_model=SearchResult)
+def ingest_report(file_path: str) -> SearchResult:
+    """Ingest a PDF file into the Nexus database."""
+    try:
+        report = ingest_pdf(file_path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return SearchResult(
+        id=report.id,
+        report_number=report.report_number,
+        title=report.title,
+        year=report.year,
+        type=report.type,
+        relevance=1.0,
+        pdf_url=report.file_path,
+        hits=[],
+    )
 
 
 @router.get("/health")
