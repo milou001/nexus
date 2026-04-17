@@ -1,9 +1,4 @@
-"""
-INPUT:
-- None
-OUTPUT:
-- Dependency list for Nexus backend environment.
-"""
+# Nexus Backend Dependencies
 fastapi
 uvicorn
 sqlalchemy
