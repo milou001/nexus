@@ -31,7 +31,7 @@ class Report(Base):
     embedding_id: Mapped[int] = mapped_column(Integer, ForeignKey("embeddings.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
-    embedding: Mapped["Embedding"] = relationship("Embedding", back_populates="report")
+    embedding: Mapped["Embedding"] = relationship("Embedding", foreign_keys=[embedding_id], back_populates="report")
 
 
 class Embedding(Base):
@@ -45,4 +45,4 @@ class Embedding(Base):
     model_name: Mapped[str] = mapped_column(String(128), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
-    report: Mapped[Report] = relationship("Report", back_populates="embedding")
+    report: Mapped[Report] = relationship("Report", foreign_keys=[report_id], back_populates="embedding")
