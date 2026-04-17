@@ -5,4 +5,5 @@ sqlalchemy
 pymupdf
 httpx
 pydantic
+pydantic-settings
 python-multipart

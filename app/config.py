@@ -7,7 +7,7 @@ OUTPUT:
 from __future__ import annotations
 
 from pathlib import Path
-from pydantic import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class NexusSettings(BaseSettings):
@@ -19,9 +19,7 @@ class NexusSettings(BaseSettings):
     embedding_model: str = "nomic-embed-text"
     ingress_path: Path = Path("/home/micha/nexus/ingress/")
 
-    class Config:
-        env_prefix = "NEXUS_"
-        case_sensitive = False
+    model_config = SettingsConfigDict(env_prefix="NEXUS_", case_sensitive=False)
 
 
 settings = NexusSettings()
