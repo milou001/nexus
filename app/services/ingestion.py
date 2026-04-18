@@ -17,6 +17,9 @@ from app.config import settings
 from app.models.report import Base, Embedding, Report
 from app.services.embedder import embedding_service
 
+# Maximum characters per embedding request (Ollama has context limits)
+CHUNK_SIZE = 2000
+
 
 def ingest_pdf(file_path: str) -> Report:
     engine = create_engine(f"sqlite:///{settings.db_path}")
@@ -38,17 +41,55 @@ def ingest_pdf(file_path: str) -> Report:
         content_text=text_content,
     )
 
-    embedding_vector = embedding_service.get_embedding(text_content)
-    embedding = Embedding(vector=embedding_vector, model_name=settings.embedding_model, report=report)
+    # Chunk text and average embeddings
+    chunks = _split_text(text_content, CHUNK_SIZE)
+    embeddings = embedding_service.get_embeddings_batch(chunks)
+    avg_embedding = _average_embeddings(embeddings)
 
     with Session(engine) as session:
         session.add(report)
-        session.add(embedding)
         session.commit()
         session.refresh(report)
 
-    archive_dir = pdf_path.with_name("archive")
+        embedding = Embedding(
+            report_id=report.id,
+            vector=avg_embedding,
+            model_name=settings.embedding_model,
+        )
+        session.add(embedding)
+        session.commit()
+
+    archive_dir = pdf_path.parent / "archive"
     archive_dir.mkdir(exist_ok=True)
     move(str(pdf_path), archive_dir / pdf_path.name)
 
     return report
+
+
+def _split_text(text: str, chunk_size: int) -> list[str]:
+    """Split text into chunks of approximately chunk_size characters."""
+    if len(text) <= chunk_size:
+        return [text] if text.strip() else ["empty document"]
+
+    chunks: list[str] = []
+    for i in range(0, len(text), chunk_size):
+        chunk = text[i : i + chunk_size].strip()
+        if chunk:
+            chunks.append(chunk)
+
+    return chunks if chunks else ["empty document"]
+
+
+def _average_embeddings(embeddings: list[list[float]]) -> list[float]:
+    """Average multiple embedding vectors into one."""
+    if not embeddings:
+        return []
+    if len(embeddings) == 1:
+        return embeddings[0]
+
+    dim = len(embeddings[0])
+    avg = [0.0] * dim
+    for emb in embeddings:
+        for i in range(dim):
+            avg[i] += emb[i]
+    return [v / len(embeddings) for v in avg]
