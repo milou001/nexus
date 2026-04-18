@@ -17,7 +17,10 @@ class NexusSettings(BaseSettings):
     db_path_prod: Path = Path("/home/micha/nexus/data/nexus.db")
     ollama_url: str = "http://localhost:11434"
     embedding_model: str = "nomic-embed-text"
+    chapter_model: str = "qwen2.5:7b"
     ingress_path: Path = Path("/home/micha/nexus/ingress/")
+    originals_path: Path = Path("./data/originals")
+    chapters_path: Path = Path("./data/chapters")
 
     model_config = SettingsConfigDict(env_prefix="NEXUS_", case_sensitive=False)
 
