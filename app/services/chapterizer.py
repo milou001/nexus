@@ -147,8 +147,8 @@ class Chapterizer:
                 if not chapters:
                     chapters = self._regex_fallback(document)
 
-            # Step 4: Save chapter PDFs
-            chapter_dir = self._save_chapter_pdfs(document, chapters, pdf_path)
+            # Step 4: Save chapter PDFs (skip TOC pages)
+            chapter_dir = self._save_chapter_pdfs(document, chapters, pdf_path, toc_end_page)
 
             # Step 5: Extract text per chapter
             for ch in chapters:
@@ -304,21 +304,24 @@ class Chapterizer:
         document: fitz.Document,
         chapters: list[ChapterInfo],
         source_pdf_path: str,
+        toc_end_page: int = 0,
     ) -> str:
         """
         Save each chapter as a separate PDF.
         File naming: {KEY}.pdf (e.g. SUMM.pdf, MODEL.pdf, RESULT.pdf)
         Saved in output_dir/{report_id}/
+        TOC pages (1..toc_end_page) are excluded from chapter PDFs.
         Returns the chapter directory path.
         """
-        # Generate report ID from source filename
         source_stem = Path(source_pdf_path).stem
         chapter_dir = Path(self.output_dir) / source_stem
         chapter_dir.mkdir(parents=True, exist_ok=True)
 
         for ch in chapters:
             output_path = chapter_dir / f"{ch.key}.pdf"
-            self._extract_pages_to_pdf(document, ch.page_start, ch.page_end, str(output_path))
+            self._extract_pages_to_pdf(
+                document, ch.page_start, ch.page_end, str(output_path), toc_end_page
+            )
             ch.pdf_path = str(output_path)
 
         return str(chapter_dir)
@@ -329,17 +332,23 @@ class Chapterizer:
         page_start: int,
         page_end: int,
         output_path: str,
+        toc_end_page: int = 0,
     ) -> None:
         """
         Extract pages from document (1-based) and save as new PDF.
         page_start and page_end are inclusive.
+        Skips TOC pages (1..toc_end_page).
         """
         new_doc = fitz.open()
         for page_num in range(page_start, page_end + 1):
+            # Skip TOC pages
+            if page_num <= toc_end_page:
+                continue
             idx = page_num - 1  # Convert to 0-based
             if 0 <= idx < len(document):
                 new_doc.insert_pdf(document, from_page=idx, to_page=idx)
-        new_doc.save(output_path)
+        if new_doc.page_count > 0:
+            new_doc.save(output_path)
         new_doc.close()
 
     def _extract_chapter_text(self, document: fitz.Document, chapter: ChapterInfo) -> str:
