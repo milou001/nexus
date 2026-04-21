@@ -150,9 +150,9 @@ class Chapterizer:
             # Step 4: Save chapter PDFs (skip TOC pages)
             chapter_dir = self._save_chapter_pdfs(document, chapters, pdf_path, toc_end_page)
 
-            # Step 5: Extract text per chapter
+            # Step 5: Extract text per chapter (skip TOC pages)
             for ch in chapters:
-                ch_content = self._extract_chapter_text(document, ch)
+                ch_content = self._extract_chapter_text(document, ch, toc_end_page)
                 # Store content for later embedding
 
             full_text = ""
@@ -205,13 +205,22 @@ class Chapterizer:
 
     def _parse_toc_headings(self, toc_text: str) -> list[dict[str, Any]]:
         """
-        Parse Hauptüberschriften from TOC text.
-        Main headings: single-digit number (1-9), left-aligned, no tab indent.
-        Sub-headings: tab-indented or multi-digit → ignored.
+        Parse NUR Hauptüberschriften from TOC text.
+        Main headings: single-digit number (1-9) followed by space and title.
+        Sub-headings like "5.1 Modellbeschreibung" or "5.1.2 Detail" are STRICTLY excluded.
 
-        Example TOC line: "1  Zusammenfassung  6"
-        or: "1\tZusammenfassung\t6"
-        or: "1 Zusammenfassung .................. 6"
+        Rules:
+        - Must start with single digit 1-9, optionally followed by '.'
+        - Must NOT have additional digits after the dot (e.g. 5.1, 5.1.2)
+        - Title must be followed by page number
+        - Tab-indented lines are always sub-headings
+
+        Example TOC lines:
+        MAIN:   "1  Zusammenfassung  6"
+        MAIN:   "5 Berechnungsmodell ............ 15"
+        SUB:    "5.1 Modellbeschreibung  15"      → SKIP
+        SUB:    "\t5.1 Modellbeschreibung  15"    → SKIP
+        SUB:    "5.1.2 Detail  17"                → SKIP
         """
         headings: list[dict[str, Any]] = []
         lines = toc_text.split("\n")
@@ -221,26 +230,30 @@ class Chapterizer:
             if not line_stripped:
                 continue
 
-            # Skip sub-headings: lines starting with tab or multi-digit numbers
+            # Skip lines starting with tab → sub-heading
             if line.startswith("\t"):
                 continue
 
-            # Main heading patterns
+            # STRICT main heading pattern:
+            # Single digit 1-9, then optional '.', then MUST be whitespace (not more digits)
+            # This excludes 5.1, 5.1.2, etc.
+            # Pattern: ^\d(?!\.\d)  → digit NOT followed by .digit
+
             # Pattern 1: "1  Zusammenfassung  6" (spaces)
             main_match = re.match(
-                r"^(\d)\.?\s+(.+?)\s{2,}(\d+)\s*$",
+                r"^(\d)(?!\.\d)\.?\s+(.+?)\s{2,}(\d+)\s*$",
                 line_stripped,
             )
             if not main_match:
                 # Pattern 2: "1\tZusammenfassung\t6" (tabs)
                 main_match = re.match(
-                    r"^(\d)\.?\s+(.+?)\t+(\d+)\s*$",
+                    r"^(\d)(?!\.\d)\.?\s+(.+?)\t+(\d+)\s*$",
                     line_stripped,
                 )
             if not main_match:
                 # Pattern 3: "1 Zusammenfassung ............ 6" (dots)
                 main_match = re.match(
-                    r"^(\d)\.?\s+(.+?)\s+\.+\s*(\d+)\s*$",
+                    r"^(\d)(?!\.\d)\.?\s+(.+?)\s+\.+\s*(\d+)\s*$",
                     line_stripped,
                 )
 
@@ -251,8 +264,8 @@ class Chapterizer:
                 # Skip "Inhaltsverzeichnis" itself
                 if re.search(r"inhaltsverzeichnis", title, re.IGNORECASE):
                     continue
-                # Skip sub-headings (2+ digit numbers like 1.1, 2.3)
-                if num > 9:
+                # Extra safety: skip if title looks like a sub-heading number
+                if re.match(r"^\d+\.\d+", title):
                     continue
                 headings.append({
                     "number": num,
@@ -351,10 +364,12 @@ class Chapterizer:
             new_doc.save(output_path)
         new_doc.close()
 
-    def _extract_chapter_text(self, document: fitz.Document, chapter: ChapterInfo) -> str:
-        """Extract text content for a chapter's page range."""
+    def _extract_chapter_text(self, document: fitz.Document, chapter: ChapterInfo, toc_end_page: int = 0) -> str:
+        """Extract text content for a chapter's page range, skipping TOC pages."""
         texts: list[str] = []
         for page_num in range(chapter.page_start, chapter.page_end + 1):
+            if page_num <= toc_end_page:
+                continue
             idx = page_num - 1
             if 0 <= idx < len(document):
                 texts.append(document[idx].get_text("text"))
