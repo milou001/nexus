@@ -3,14 +3,16 @@ INPUT:
 - pdf_path: str — Path to the source PDF file.
 - ollama_url: str — Base URL of the Ollama server.
 - model: str — Ollama model used for chapter detection.
+- output_dir: str — Base directory for chapter PDFs (default: ./data/chapters).
 OUTPUT:
-- ChapterizerResult containing detected chapters with page ranges and raw TOC text.
+- ChapterizerResult containing detected chapters with page ranges, file paths, and raw TOC text.
+  Chapter PDFs are saved as {KEY}.pdf in output_dir.
 """
 from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -24,13 +26,13 @@ from app.config import settings
 # ── Semantic key definitions ──────────────────────────────────────────
 
 SEMANTIC_KEY_MAP: dict[str, str] = {
-    # German → Key
+    # German → Key (longest matches first for specificity)
     "zusammenfassung": "SUMM",
     "unterschriften": "SIGN",
     "angaben zum auftrag": "BILLING",
-    "auftrag": "BILLING",
     "abrechnung": "BILLING",
     "aufwand": "BILLING",
+    "auftrag": "BILLING",
     "untersuchungsgegenstand": "SCOPE",
     "gegenstand": "SCOPE",
     "einleitung": "SCOPE",
@@ -88,6 +90,7 @@ class ChapterInfo(BaseModel):
     subtitle: str | None = None
     page_start: int
     page_end: int
+    pdf_path: str | None = None
 
     @classmethod
     def validate_key(cls, key: str) -> str:
@@ -103,22 +106,27 @@ class ChapterizerResult:
     chapters: list[ChapterInfo]
     raw_text: str
     toc_text: str
+    chapter_dir: str = ""
 
 
 class Chapterizer:
-    """Detects chapters by extracting the Inhaltsverzeichnis, then verifying via LLM."""
+    """Detects chapters from TOC, saves each chapter as a separate PDF."""
 
-    def __init__(self, ollama_url: str | None = None, model: str | None = None) -> None:
+    def __init__(
+        self,
+        ollama_url: str | None = None,
+        model: str | None = None,
+        output_dir: str | None = None,
+    ) -> None:
         self.ollama_url = ollama_url or settings.ollama_url
         self.model = model or settings.chapter_model
+        self.output_dir = output_dir or str(settings.chapters_path)
         self._client = httpx.Client(base_url=self.ollama_url, timeout=120)
 
     def detect_chapters(self, pdf_path: str) -> ChapterizerResult:
         document = fitz.open(pdf_path)
         try:
-            full_text = ""
-            for page in document:
-                full_text += page.get_text("text") + "\n"
+            total_pages = len(document)
 
             # Step 1: Extract TOC pages
             toc_text, toc_end_page = self._extract_toc(document)
@@ -128,27 +136,45 @@ class Chapterizer:
 
             # Step 3: If TOC found headings, use them + LLM verification
             if headings:
-                chapters = self._headings_to_chapters(headings, len(document), toc_end_page)
-                # LLM verification: check headings match actual content
+                chapters = self._headings_to_chapters(headings, total_pages, toc_end_page)
+                # LLM verification
                 verified = self._verify_chapters_llm(toc_text, chapters, document)
                 if verified:
                     chapters = verified
             else:
                 # Fallback: LLM-only or regex
-                chapters = self._llm_fallback(full_text, len(document))
+                chapters = self._llm_fallback(document)
                 if not chapters:
                     chapters = self._regex_fallback(document)
+
+            # Step 4: Save chapter PDFs
+            chapter_dir = self._save_chapter_pdfs(document, chapters, pdf_path)
+
+            # Step 5: Extract text per chapter
+            for ch in chapters:
+                ch_content = self._extract_chapter_text(document, ch)
+                # Store content for later embedding
+
+            full_text = ""
+            for page in document:
+                full_text += page.get_text("text") + "\n"
 
         finally:
             document.close()
 
-        return ChapterizerResult(chapters=chapters, raw_text=full_text, toc_text=toc_text)
+        return ChapterizerResult(
+            chapters=chapters,
+            raw_text=full_text,
+            toc_text=toc_text,
+            chapter_dir=chapter_dir,
+        )
 
     # ── TOC Extraction ────────────────────────────────────────────────
 
     def _extract_toc(self, document: fitz.Document) -> tuple[str, int]:
         """
         Find pages containing 'Inhaltsverzeichnis' and extract all TOC text.
+        TOC can span multiple pages.
         Returns (toc_text, toc_end_page).
         """
         toc_pages: list[str] = []
@@ -158,7 +184,6 @@ class Chapterizer:
 
         for page_index, page in enumerate(document, start=1):
             text = page.get_text("text")
-            # Check if this page starts or continues the TOC
             if not in_toc and re.search(r"inhaltsverzeichnis", text, re.IGNORECASE):
                 in_toc = True
                 toc_start_page = page_index
@@ -166,15 +191,12 @@ class Chapterizer:
             if in_toc:
                 toc_pages.append(text)
                 toc_end_page = page_index
-                # TOC ends when we hit a main heading that's NOT part of TOC
-                # (TOC entries have tab indentation, real headings don't)
-                # We keep collecting until we see a page without TOC-like content
+                # Check if this page still has TOC-like entries
                 lines = text.strip().split("\n")
                 has_toc_entries = any(
                     "\t" in line or re.match(r"^\d+\.\s", line) for line in lines
                 )
                 if not has_toc_entries and page_index > toc_start_page:
-                    # This page has no TOC entries — remove it, TOC ended before
                     toc_pages.pop()
                     toc_end_page = page_index - 1
                     break
@@ -184,8 +206,12 @@ class Chapterizer:
     def _parse_toc_headings(self, toc_text: str) -> list[dict[str, Any]]:
         """
         Parse Hauptüberschriften from TOC text.
-        Main headings: single-digit number prefix, left-aligned (no leading tab).
-        Sub-headings: indented with tab.
+        Main headings: single-digit number (1-9), left-aligned, no tab indent.
+        Sub-headings: tab-indented or multi-digit → ignored.
+
+        Example TOC line: "1  Zusammenfassung  6"
+        or: "1\tZusammenfassung\t6"
+        or: "1 Zusammenfassung .................. 6"
         """
         headings: list[dict[str, Any]] = []
         lines = toc_text.split("\n")
@@ -195,12 +221,29 @@ class Chapterizer:
             if not line_stripped:
                 continue
 
-            # Main heading: "1 Zusammenfassung .... 5" or "1. Zusammenfassung ... 5"
-            # Single digit (1-9) followed by title and page number
+            # Skip sub-headings: lines starting with tab or multi-digit numbers
+            if line.startswith("\t"):
+                continue
+
+            # Main heading patterns
+            # Pattern 1: "1  Zusammenfassung  6" (spaces)
             main_match = re.match(
                 r"^(\d)\.?\s+(.+?)\s{2,}(\d+)\s*$",
                 line_stripped,
             )
+            if not main_match:
+                # Pattern 2: "1\tZusammenfassung\t6" (tabs)
+                main_match = re.match(
+                    r"^(\d)\.?\s+(.+?)\t+(\d+)\s*$",
+                    line_stripped,
+                )
+            if not main_match:
+                # Pattern 3: "1 Zusammenfassung ............ 6" (dots)
+                main_match = re.match(
+                    r"^(\d)\.?\s+(.+?)\s+\.+\s*(\d+)\s*$",
+                    line_stripped,
+                )
+
             if main_match:
                 num = int(main_match.group(1))
                 title = main_match.group(2).strip()
@@ -208,25 +251,8 @@ class Chapterizer:
                 # Skip "Inhaltsverzeichnis" itself
                 if re.search(r"inhaltsverzeichnis", title, re.IGNORECASE):
                     continue
-                headings.append({
-                    "number": num,
-                    "title": title,
-                    "page": page,
-                    "is_main": True,
-                })
-                continue
-
-            # Alternative: main heading with tab-separated page number
-            # "1\tZusammenfassung\t5"
-            tab_match = re.match(
-                r"^(\d)\.?\s+(.+?)\t+(\d+)\s*$",
-                line_stripped,
-            )
-            if tab_match:
-                num = int(tab_match.group(1))
-                title = tab_match.group(2).strip()
-                page = int(tab_match.group(3))
-                if re.search(r"inhaltsverzeichnis", title, re.IGNORECASE):
+                # Skip sub-headings (2+ digit numbers like 1.1, 2.3)
+                if num > 9:
                     continue
                 headings.append({
                     "number": num,
@@ -243,17 +269,19 @@ class Chapterizer:
         total_pages: int,
         toc_end_page: int,
     ) -> list[ChapterInfo]:
-        """Convert parsed TOC headings into ChapterInfo objects with page ranges."""
+        """
+        Convert TOC headings to ChapterInfo with page ranges.
+        Page ranges: current heading page → next heading page - 1.
+        Last chapter: page_start → total_pages.
+        """
         chapters: list[ChapterInfo] = []
+        main_headings = [h for h in headings if h.get("is_main")]
 
-        for i, heading in enumerate(headings):
-            if not heading.get("is_main"):
-                continue
-
+        for i, heading in enumerate(main_headings):
             page_start = heading["page"]
-            # End page = start of next main heading - 1, or total pages
-            if i + 1 < len(headings):
-                page_end = headings[i + 1]["page"] - 1
+            # End = start of next chapter - 1, or total pages for last chapter
+            if i + 1 < len(main_headings):
+                page_end = main_headings[i + 1]["page"] - 1
             else:
                 page_end = total_pages
 
@@ -268,6 +296,60 @@ class Chapterizer:
             ))
 
         return chapters
+
+    # ── Save Chapter PDFs ─────────────────────────────────────────────
+
+    def _save_chapter_pdfs(
+        self,
+        document: fitz.Document,
+        chapters: list[ChapterInfo],
+        source_pdf_path: str,
+    ) -> str:
+        """
+        Save each chapter as a separate PDF.
+        File naming: {KEY}.pdf (e.g. SUMM.pdf, MODEL.pdf, RESULT.pdf)
+        Saved in output_dir/{report_id}/
+        Returns the chapter directory path.
+        """
+        # Generate report ID from source filename
+        source_stem = Path(source_pdf_path).stem
+        chapter_dir = Path(self.output_dir) / source_stem
+        chapter_dir.mkdir(parents=True, exist_ok=True)
+
+        for ch in chapters:
+            output_path = chapter_dir / f"{ch.key}.pdf"
+            self._extract_pages_to_pdf(document, ch.page_start, ch.page_end, str(output_path))
+            ch.pdf_path = str(output_path)
+
+        return str(chapter_dir)
+
+    def _extract_pages_to_pdf(
+        self,
+        document: fitz.Document,
+        page_start: int,
+        page_end: int,
+        output_path: str,
+    ) -> None:
+        """
+        Extract pages from document (1-based) and save as new PDF.
+        page_start and page_end are inclusive.
+        """
+        new_doc = fitz.open()
+        for page_num in range(page_start, page_end + 1):
+            idx = page_num - 1  # Convert to 0-based
+            if 0 <= idx < len(document):
+                new_doc.insert_pdf(document, from_page=idx, to_page=idx)
+        new_doc.save(output_path)
+        new_doc.close()
+
+    def _extract_chapter_text(self, document: fitz.Document, chapter: ChapterInfo) -> str:
+        """Extract text content for a chapter's page range."""
+        texts: list[str] = []
+        for page_num in range(chapter.page_start, chapter.page_end + 1):
+            idx = page_num - 1
+            if 0 <= idx < len(document):
+                texts.append(document[idx].get_text("text"))
+        return "\n".join(texts)
 
     # ── LLM Verification ──────────────────────────────────────────────
 
@@ -286,7 +368,6 @@ class Chapterizer:
             for c in chapters
         )
 
-        # Sample first few lines of each detected chapter page for verification
         samples = self._sample_chapter_pages(document, chapters)
 
         prompt = (
@@ -299,7 +380,7 @@ class Chapterizer:
             f"{samples}\n\n"
             "Prüfe:\n"
             "1. Stimmen die SEMANTIC_KEYS? Korrigiere falls nötig.\n"
-            "2. Stimmen die Seitenbereiche?\n"
+            "2. Stimmen die Seitenbereiche (page_end = page_start des nächsten - 1)?\n"
             "3. Fehlt ein Hauptkapitel?\n\n"
             "Verfügbare KEYS:\n"
             "- SUMM: Zusammenfassung, Fazit\n"
@@ -333,7 +414,7 @@ class Chapterizer:
         """Extract first 5 lines of each chapter's start page for LLM verification."""
         samples: list[str] = []
         for ch in chapters:
-            page_idx = ch.page_start - 1  # 0-based
+            page_idx = ch.page_start - 1
             if 0 <= page_idx < len(document):
                 text = document[page_idx].get_text("text")
                 first_lines = "\n".join(text.strip().split("\n")[:5])
@@ -342,13 +423,17 @@ class Chapterizer:
 
     # ── LLM Fallback ──────────────────────────────────────────────────
 
-    def _llm_fallback(self, full_text: str, total_pages: int) -> list[ChapterInfo]:
+    def _llm_fallback(self, document: fitz.Document) -> list[ChapterInfo]:
         """Full LLM analysis when no TOC is found."""
-        # Truncate to avoid context overflow
+        full_text = ""
+        for page in document:
+            full_text += page.get_text("text") + "\n"
         truncated = full_text[:6000]
+        total_pages = len(document)
+
         prompt = (
             "Analysiere diesen technischen Bericht und identifiziere die HAUPTKAPITEL.\n\n"
-            "Gesamtseitenzahl: " + str(total_pages) + "\n\n"
+            f"Gesamtseitenzahl: {total_pages}\n\n"
             "Berichtstext (Auszug):\n"
             f"{truncated}\n\n"
             "Antworte NUR als JSON-Array:\n"
@@ -391,10 +476,9 @@ class Chapterizer:
                     continue
                 for line in block["lines"]:
                     for span in line["spans"]:
-                        # Bold + large font = likely main heading
                         if span["flags"] & 2**4:  # bold flag
                             text = span["text"].strip()
-                            if text and len(text) > 3 and not text.startswith("Inhaltsverzeichnis"):
+                            if text and len(text) > 3 and not re.search(r"inhaltsverzeichnis", text, re.IGNORECASE):
                                 key = self._guess_key_from_title(text)
                                 if chapters:
                                     chapters[-1].page_end = page_index
@@ -423,7 +507,6 @@ class Chapterizer:
 
     def _guess_key_from_title(self, title: str) -> str:
         normalized = title.lower().strip()
-        # Check longest matches first for specificity
         for needle, key in sorted(SEMANTIC_KEY_MAP.items(), key=lambda x: -len(x[0])):
             if needle in normalized:
                 return key
